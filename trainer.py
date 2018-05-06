@@ -23,11 +23,13 @@ def main(_):
     server.join()
   elif FLAGS.job_name == "worker":
 
+    gpu = (FLAGS.task_index % 2) 
     # Assigns ops to the local worker by default.
     with tf.device(tf.train.replica_device_setter(
         # TODO Failed on GPU...
         #worker_device="/job:worker/task:%d" % FLAGS.task_index,
-        worker_device="/job:worker/task:%d/cpu:0" % FLAGS.task_index,
+        worker_device="/job:worker/task:%d/gpu:%d" % (FLAGS.task_index, gpu),
+        #ps_device="/job:ps/cpu:0",
         cluster=cluster)):
     
       global_step = tf.contrib.framework.get_or_create_global_step()
@@ -59,10 +61,11 @@ def main(_):
 
     # The StopAtStepHook handles stopping after running given steps.
     hooks=[tf.train.StopAtStepHook(last_step=1000000)]
-    #config = tf.ConfigProto()
-    #config.gpu_options.allow_growth = True
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    config.log_device_placement = True
     with tf.train.MonitoredTrainingSession(master=server.target,
-                                           #config=config,
+                                           config=config,
                                            is_chief=(FLAGS.task_index == 0),
                                            checkpoint_dir="/tmp/train_logs",
                                            hooks=hooks) as mon_sess:
