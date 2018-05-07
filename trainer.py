@@ -23,13 +23,12 @@ def main(_):
     server.join()
   elif FLAGS.job_name == "worker":
 
-    gpu = (FLAGS.task_index % 2) 
     # Assigns ops to the local worker by default.
     with tf.device(tf.train.replica_device_setter(
         # TODO Failed on GPU...
-        #worker_device="/job:worker/task:%d" % FLAGS.task_index,
-        worker_device="/job:worker/task:%d/gpu:%d" % (FLAGS.task_index, gpu),
-        #ps_device="/job:ps/cpu:0",
+        worker_device="/job:worker/task:%d/cpu:0" % FLAGS.task_index,
+        ps_device="/job:ps/cpu:0",
+        #worker_device="/job:worker/task:%d/cpu:0" % FLAGS.task_index,
         cluster=cluster)):
     
       global_step = tf.contrib.framework.get_or_create_global_step()
@@ -52,29 +51,58 @@ def main(_):
         cross_entropy = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y_, logits=y))
 
       with tf.name_scope("train"):
-        train_step = tf.train.GradientDescentOptimizer(0.5).minimize(cross_entropy)
+        #train_step = tf.train.GradientDescentOptimizer(0.5).minimize(cross_entropy)
+        opt = tf.train.GradientDescentOptimizer(0.5)
+        opt = tf.train.SyncReplicasOptimizer(
+            opt,
+            replicas_to_aggregate=1,
+            total_num_replicas=1,
+            name="mnist_sync_replicas")
+        train_step = opt.minimize(cross_entropy, global_step=global_step)
 
       with tf.name_scope("acc"):
         init_op = tf.initialize_all_variables()
         correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
+      local_init_op = opt.chief_init_op
+      ready_for_local_init_op = opt.ready_for_local_init_op
+      chief_queue_runner = opt.get_chief_queue_runner()
+      sync_init_op = opt.get_init_tokens_op()
+      init_op = tf.global_variables_initializer()
+
+      sv = tf.train.Supervisor(
+        init_op=init_op,
+        local_init_op=local_init_op,
+        ready_for_local_init_op=ready_for_local_init_op,
+        recovery_wait_secs=1,
+        global_step=global_step)
+      
+      config = tf.ConfigProto(
+          allow_soft_placement=True,
+          log_device_placement=False,
+          device_filters=["/job:ps", "/job:worker/task:%d" % FLAGS.task_index])
+      
+      sess = sv.prepare_or_wait_for_session(server.target, config=config)
+      print("Worker %d: Session initialization complete." % FLAGS.task_index)
+      sess.run(sync_init_op)
+      sv.start_queue_runners(sess, [chief_queue_runner])
+
     # The StopAtStepHook handles stopping after running given steps.
-    hooks=[tf.train.StopAtStepHook(last_step=1000000)]
-    config = tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    config.log_device_placement = True
-    with tf.train.MonitoredTrainingSession(master=server.target,
-                                           config=config,
-                                           is_chief=(FLAGS.task_index == 0),
-                                           checkpoint_dir="/tmp/train_logs",
-                                           hooks=hooks) as mon_sess:
+    #hooks=[tf.train.StopAtStepHook(last_step=1000000)]
+
+
+    #with tf.train.MonitoredTrainingSession(master=server.target,
+    #                                       #config=config,
+    #                                       is_chief=(FLAGS.task_index == 0),
+    #                                       #checkpoint_dir="/tmp/train_logs",
+    #                                       hooks=hooks) as mon_sess:
       for _ in range(100):
         batch_xs, batch_ys = mnist.train.next_batch(100)
-        mon_sess.run(train_step, feed_dict={x: batch_xs, y_: batch_ys})
+        sess.run(train_step, feed_dict={x: batch_xs, y_: batch_ys})
 
       print("accuracy is: ")
-      print(mon_sess.run(accuracy, feed_dict={x: mnist.test.images, y_: mnist.test.labels}))
+      print(sess.run(accuracy, feed_dict={x: mnist.test.images, y_: mnist.test.labels}))
 
 
 
